@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - run: go vet ./...
+      - run: go test ./...
+
+  smoke:
+    # Actually builds a release-flag binary and exercises it over HTTP.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Build release binary
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o frith-smoke ./cmd/frith
+      - name: Smoke test the running binary
+        run: |
+          UPLOAD_TOKEN=smoke ./frith-smoke -addr 127.0.0.1:8099 -data ./smoke-data &
+          PID=$!
+          sleep 1
+          curl -fsS http://127.0.0.1:8099/api/healthcheck | grep -q "ok" || { echo "healthcheck failed"; exit 1; }
+          URL=$(curl -fsS -X POST http://127.0.0.1:8099/api/upload -H "Authorization: Bearer smoke" -F "file=@README.md" | jq -r '.files[0].url')
+          [ -n "$URL" ] || { echo "upload returned no URL"; exit 1; }
+          PATH_ONLY="${URL#http://127.0.0.1:8099}"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8099$PATH_ONLY")" = "200" ] || { echo "serve failed"; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=0-4' "http://127.0.0.1:8099$PATH_ONLY")" = "206" ] || { echo "range failed"; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8099/api/upload -F 'file=@README.md')" = "401" ] || { echo "auth not enforced"; exit 1; }
+          kill $PID
+          echo "SMOKE OK: healthcheck / upload / serve / range / auth all good"

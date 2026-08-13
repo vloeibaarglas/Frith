@@ -1,0 +1,21 @@
+services:
+  frith:
+    # build: .            # uncomment to build from source instead of pulling
+    image: ghcr.io/vloeibaarglas/frith:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Required. Multiple keys are allowed, comma-separated.
+      UPLOAD_TOKEN: ${UPLOAD_TOKEN:?set UPLOAD_TOKEN in .env}
+      # Public base URL used in upload responses (https://media.example.com).
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-500}
+      # UPLOAD_PATH: /        # URL prefix files are served under (default /)
+      # UPLOAD_ALLOW: ""      # empty = allow all extensions
+      # UPLOAD_DENY: sh,exe   # block specific extensions
+      # UPLOAD_LIST: "true"   # enable token-authenticated GET /api/files inventory
+      # UPLOAD_ORIGINAL_NAME: "true"  # capture & serve original filenames
+    volumes:
+      # Your files live here; bind-mount to keep them outside the container.
+      - ./uploads:/data
