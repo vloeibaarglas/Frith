@@ -1,0 +1,9 @@
+.git
+uploads
+frith
+Dockerfile
+.dockerignore
+docker-compose.yml
+.env.example
+.github
+README.md
