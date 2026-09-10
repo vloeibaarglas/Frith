@@ -24,6 +24,7 @@
 //	UPLOAD_DENY    comma-separated deny-list of extensions (default: none)
 //	UPLOAD_LIST    enable GET /api/files (token-authenticated) (default false)
 //	UPLOAD_ORIGINAL_NAME  capture and serve original filenames (default false)
+//	UPLOAD_PRIVATE  honor X-Private uploads into dataDir/private (default false)
 package main
 
 import (
@@ -107,6 +108,7 @@ type config struct {
 	deny         map[string]bool
 	list         bool // expose GET /api/files (token-authenticated)
 	originalName bool // capture + serve original filenames
+	private      bool // honor X-Private uploads into dataDir/private (default off)
 }
 
 type fileResult struct {
@@ -114,7 +116,8 @@ type fileResult struct {
 	Name         string `json:"name"`
 	Type         string `json:"type"`
 	Size         int64  `json:"size"`
-	URL          string `json:"url"`
+	URL          string `json:"url,omitempty"`
+	Private      bool   `json:"private,omitempty"`
 	OriginalName string `json:"originalName,omitempty"`
 }
 
@@ -122,6 +125,9 @@ func main() {
 	cfg := parseConfig()
 	if err := os.MkdirAll(cfg.dataDir, 0o755); err != nil {
 		log.Fatalf("cannot create data dir %s: %v", cfg.dataDir, err)
+	}
+	if err := os.MkdirAll(filepath.Join(cfg.dataDir, "private"), 0o755); err != nil {
+		log.Fatalf("cannot create private dir: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -155,6 +161,7 @@ func parseConfig() config {
 	deny := flag.String("deny", envOr("UPLOAD_DENY", ""), "comma-separated denied extensions")
 	list := flag.Bool("list", envBool("UPLOAD_LIST", false), "enable GET /api/files listing (token-authenticated)")
 	originalName := flag.Bool("original-name", envBool("UPLOAD_ORIGINAL_NAME", false), "capture and serve original filenames via Content-Disposition")
+	private := flag.Bool("private", envBool("UPLOAD_PRIVATE", false), "honor X-Private uploads (stored under private/, never publicly served)")
 	flag.Parse()
 
 	tokenStr := strings.TrimSpace(envOr("UPLOAD_TOKEN", ""))
@@ -200,6 +207,7 @@ func parseConfig() config {
 		deny:         parseExtList(denyVal),
 		list:         *list,
 		originalName: *originalName,
+		private:      *private,
 	}
 }
 
@@ -299,14 +307,19 @@ func handleUpload(cfg config) http.HandlerFunc {
 		}
 		cfg.urlBase = base
 
+		private := isPrivateRequest(r)
+		if private && !cfg.private {
+			http.Error(w, "private uploads are disabled", http.StatusForbidden)
+			return
+		}
 		var (
 			results []fileResult
 			err     error
 		)
 		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
-			results, err = uploadMultipart(r, cfg)
+			results, err = uploadMultipart(r, cfg, private)
 		} else {
-			results, err = uploadRaw(r, cfg)
+			results, err = uploadRaw(r, cfg, private)
 		}
 		if err != nil {
 			var code int
@@ -327,7 +340,15 @@ func handleUpload(cfg config) http.HandlerFunc {
 	}
 }
 
-func uploadMultipart(r *http.Request, cfg config) ([]fileResult, error) {
+func isPrivateRequest(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Private"))) {
+	case "true", "1":
+		return true
+	}
+	return false
+}
+
+func uploadMultipart(r *http.Request, cfg config, private bool) ([]fileResult, error) {
 	mr, err := r.MultipartReader()
 	if err != nil {
 		return nil, err
@@ -344,7 +365,7 @@ func uploadMultipart(r *http.Request, cfg config) ([]fileResult, error) {
 		if part.FileName() == "" {
 			continue // plain form field, skip
 		}
-		res, err := saveStream(part, part.FileName(), cfg)
+		res, err := saveStream(part, part.FileName(), cfg, private)
 		if err != nil {
 			return nil, err
 		}
@@ -356,7 +377,7 @@ func uploadMultipart(r *http.Request, cfg config) ([]fileResult, error) {
 	return results, nil
 }
 
-func uploadRaw(r *http.Request, cfg config) ([]fileResult, error) {
+func uploadRaw(r *http.Request, cfg config, private bool) ([]fileResult, error) {
 	ext := strings.TrimPrefix(strings.ToLower(r.URL.Query().Get("ext")), ".")
 	if ext == "" {
 		ext = extFromContentType(r.Header.Get("Content-Type"))
@@ -368,7 +389,7 @@ func uploadRaw(r *http.Request, cfg config) ([]fileResult, error) {
 	if fname == "" {
 		fname = "upload." + ext
 	}
-	res, err := saveStream(r.Body, fname, cfg)
+	res, err := saveStream(r.Body, fname, cfg, private)
 	if err != nil {
 		return nil, err
 	}
@@ -376,18 +397,26 @@ func uploadRaw(r *http.Request, cfg config) ([]fileResult, error) {
 }
 
 // saveStream copies a reader to disk under a freshly generated name and
-// enforces the extension allow/deny lists and size limit.
-func saveStream(r io.Reader, filename string, cfg config) (fileResult, error) {
+// enforces the extension allow/deny lists and size limit. When private is
+// true the file goes to dataDir/private and no public URL is returned.
+func saveStream(r io.Reader, filename string, cfg config, private bool) (fileResult, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
 	if cfg.deny[ext] || (len(cfg.allow) > 0 && !cfg.allow[ext]) {
 		return fileResult{}, fmt.Errorf("%w: .%s", errExtNotAllowed, strings.TrimPrefix(ext, "."))
 	}
 
-	name, err := newName(cfg.dataDir, ext)
+	dir := cfg.dataDir
+	if private {
+		dir = filepath.Join(cfg.dataDir, "private")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fileResult{}, err
+		}
+	}
+	name, err := newName(dir, ext)
 	if err != nil {
 		return fileResult{}, err
 	}
-	path := filepath.Join(cfg.dataDir, name)
+	path := filepath.Join(dir, name)
 
 	dst, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -411,15 +440,18 @@ func saveStream(r io.Reader, filename string, cfg config) (fileResult, error) {
 	}
 
 	res := fileResult{
-		ID:   name,
-		Name: name,
-		Type: mimeType(ext),
-		Size: n,
-		URL:  cfg.urlBase + cfg.route + "/" + name,
+		ID:      name,
+		Name:    name,
+		Type:    mimeType(ext),
+		Size:    n,
+		Private: private,
+	}
+	if !private {
+		res.URL = cfg.urlBase + cfg.route + "/" + name
 	}
 	if cfg.originalName {
 		if orig := sanitizeName(filename); orig != "" {
-			if err := os.WriteFile(filepath.Join(cfg.dataDir, "."+name+".orig"), []byte(orig), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "."+name+".orig"), []byte(orig), 0o644); err != nil {
 				_ = os.Remove(path)
 				return fileResult{}, err
 			}
@@ -438,17 +470,20 @@ type listEntry struct {
 	Type         string `json:"type"`
 	Size         int64  `json:"size"`
 	Date         string `json:"date"`
+	Private      bool   `json:"private,omitempty"`
 	OriginalName string `json:"originalName,omitempty"`
 }
 
 // handleList returns a JSON inventory of the data dir (name, mime type, size,
-// mtime). Opt-in via UPLOAD_LIST and token-authenticated.
+// mtime). Opt-in via UPLOAD_LIST and token-authenticated. Private files are
+// hidden unless ?private=1 is passed.
 func handleList(cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !checkAuth(r, cfg.tokens) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		includePrivate := r.URL.Query().Get("private") == "1"
 		entries, err := os.ReadDir(cfg.dataDir)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -475,6 +510,32 @@ func handleList(cfg config) http.HandlerFunc {
 				}
 			}
 			files = append(files, entry)
+		}
+		if includePrivate {
+			if pentries, err := os.ReadDir(filepath.Join(cfg.dataDir, "private")); err == nil {
+				for _, e := range pentries {
+					if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+						continue
+					}
+					info, err := e.Info()
+					if err != nil {
+						continue
+					}
+					entry := listEntry{
+						Name:    e.Name(),
+						Type:    mimeType(filepath.Ext(e.Name())),
+						Size:    info.Size(),
+						Date:    info.ModTime().UTC().Format(time.RFC3339),
+						Private: true,
+					}
+					if cfg.originalName {
+						if b, err := os.ReadFile(filepath.Join(cfg.dataDir, "private", "."+e.Name()+".orig")); err == nil {
+							entry.OriginalName = sanitizeName(string(b))
+						}
+					}
+					files = append(files, entry)
+				}
+			}
 		}
 		sort.Slice(files, func(i, j int) bool { return files[i].Date > files[j].Date })
 		w.Header().Set("Content-Type", "application/json")

@@ -39,6 +39,7 @@ Everything is configurable via env vars or flags (flags win).
 | `UPLOAD_DENY`  | `-deny`    | *none*           | Comma-separated deny-list of extensions    |
 | `UPLOAD_LIST`  | `-list`    | `false`          | Enable token-authenticated `GET /api/files` inventory |
 | `UPLOAD_ORIGINAL_NAME` | `-original-name` | `false` | Capture & serve original filenames (sidecar metadata) |
+| `UPLOAD_PRIVATE` | `-private` | `false` | Honor `X-Private` uploads (stored under `private/`, never publicly served) |
 
 Files are served at `{UPLOAD_PATH}/{name}` (default `/`). A file is accepted when its extension is **not denied** and (if the allow-list is non-empty) **is in the allow-list**.
 
@@ -50,6 +51,15 @@ curl -X POST https://host/api/upload \
   -F "file=@photo.png"
 # => {"files":[{"url":"https://host/x9F2aB.png"}]}
 ```
+
+## Private uploads
+
+Set `UPLOAD_PRIVATE=true` (or `-private`) to enable the per-request
+`X-Private: true` upload flag. Private files land in `{UPLOAD_DIR}/private/`,
+are never served over HTTP, and come back with `"private":true` instead of a
+`url` (inventory via `GET /api/files?private=1`). Off by default; when off,
+uploads carrying `X-Private` are rejected with `403` rather than silently
+stored publicly.
 
 ## Deploying
 
