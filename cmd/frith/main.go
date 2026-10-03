@@ -75,6 +75,7 @@ var mimeByExt = map[string]string{
 	".xml":  "text/xml",
 	".zip":  "application/zip",
 	".gz":   "application/gzip",
+	".apk":  "application/vnd.android.package-archive",
 }
 
 // cacheableExt gets a long cache lifetime when served; everything else is
@@ -89,7 +90,7 @@ var defaultAllow = []string{
 	"png", "jpg", "jpeg", "gif", "svg", "webp", "avif",
 	"mp4", "webm", "mov", "m4v",
 	"pdf", "html", "htm", "txt", "md", "json", "csv", "css", "js", "xml",
-	"zip", "gz",
+	"zip", "gz", "apk", "aab", "apks", "xapk",
 }
 
 var (
